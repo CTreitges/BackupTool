@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.eggs/
+*.dist-info/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Build & distribution artifacts
+build/
+dist/
+*.exe
+*.msi
+
+# PyInstaller
+*.spec.bak
+
+# PyCharm / JetBrains IDE
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/dictionaries/
+.idea/contentModel.xml
+.idea/copilot.data.migration.ask2agent.xml
+.idea/*.xml.bak
+
+# Claude Code
+.claude/
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs & runtime data
+*.log
+logs/
+
+# Inno Setup output
+Output/
