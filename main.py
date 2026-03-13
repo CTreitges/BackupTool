@@ -169,6 +169,58 @@ def cmd_tray() -> None:
     TrayApp().run()
 
 
+def cmd_headless() -> None:
+    """Run SyncEngine without GUI (headless mode for servers)."""
+    import logging
+    import signal
+    import time
+
+    from config import load_config, CONFIG_PATH
+    from logger import setup_logger
+    from sync_engine import SyncEngine
+
+    config = load_config()
+    setup_logger("backuptool.headless", config)
+
+    log = logging.getLogger("backuptool.headless")
+    log.info("Starting BackupTool in headless mode")
+    print("BackupTool running in headless mode. Press Ctrl+C to stop.")
+
+    engine = SyncEngine(config)
+    engine.start()
+
+    stop_requested = False
+
+    def _stop(sig, frame):
+        nonlocal stop_requested
+        print("\nStopping...")
+        stop_requested = True
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    last_mtime = 0.0
+    try:
+        last_mtime = CONFIG_PATH.stat().st_mtime
+    except OSError:
+        pass
+
+    while not stop_requested:
+        time.sleep(5)
+        try:
+            mtime = CONFIG_PATH.stat().st_mtime
+            if mtime != last_mtime:
+                last_mtime = mtime
+                new_config = load_config()
+                engine.reload_config(new_config)
+                log.info("Config reloaded")
+        except OSError:
+            pass
+
+    engine.stop()
+    log.info("Headless mode stopped")
+
+
 def cmd_service() -> None:
     """Called by the Windows service manager."""
     from service import run_service
@@ -182,6 +234,7 @@ _COMMANDS = {
     "stop": cmd_stop,
     "debug": cmd_debug,
     "tray": cmd_tray,
+    "headless": cmd_headless,
     "service": cmd_service,
 }
 

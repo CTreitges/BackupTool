@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -12,7 +13,10 @@ from datetime import datetime, timezone
 
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _AUTOSTART_NAME = "BackupTool"
+_TASK_NAME = "BackupToolHeadless"
 
+
+# -- Desktop autostart (Registry Run key) ------------------------------------
 
 def _get_autostart() -> bool:
     try:
@@ -40,6 +44,52 @@ def _set_autostart(enabled: bool) -> None:
                 winreg.DeleteValue(k, _AUTOSTART_NAME)
         except FileNotFoundError:
             pass
+
+
+# -- Server autostart (Scheduled Task, headless) -----------------------------
+
+def _get_headless_autostart() -> bool:
+    try:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", _TASK_NAME],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _set_headless_autostart(enabled: bool) -> None:
+    if enabled:
+        if getattr(sys, "frozen", False):
+            exe_path = sys.executable
+        else:
+            exe_path = sys.executable
+        if getattr(sys, "frozen", False):
+            cmd = f'"{exe_path}" --headless'
+        else:
+            headless_script = str(Path(__file__).parent / "main.py")
+            cmd = f'"{exe_path}" "{headless_script}" headless'
+
+        # Create scheduled task that runs at system boot
+        import ctypes
+        ctypes.windll.shell32.ShellExecuteW(
+            0, "runas", "schtasks",
+            f'/Create /TN "{_TASK_NAME}" '
+            f'/TR "{cmd}" '
+            f'/SC ONSTART '
+            f'/RU SYSTEM '
+            f'/RL HIGHEST '
+            f'/F',
+            None, 0  # SW_HIDE
+        )
+    else:
+        import ctypes
+        ctypes.windll.shell32.ShellExecuteW(
+            0, "runas", "schtasks",
+            f'/Delete /TN "{_TASK_NAME}" /F',
+            None, 0
+        )
 
 log = logging.getLogger(__name__)
 
@@ -237,8 +287,12 @@ class SettingsWindow:
         ttk.Separator(grid, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", pady=12)
 
         self._autostart_var = tk.BooleanVar(value=_get_autostart())
-        ttk.Checkbutton(grid, text="BackupTool beim Windows-Start automatisch starten",
+        ttk.Checkbutton(grid, text="Autostart mit Tray-Icon (Desktop)",
                         variable=self._autostart_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+
+        self._headless_var = tk.BooleanVar(value=_get_headless_autostart())
+        ttk.Checkbutton(grid, text="Autostart Headless Mode (Server, kein GUI, startet bei Systemboot)",
+                        variable=self._headless_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
 
     # ------------------------------------------------------------------
     # Tab: Status
@@ -284,6 +338,11 @@ class SettingsWindow:
             _set_autostart(self._autostart_var.get())
         except Exception as e:
             messagebox.showwarning("Autostart", f"Could not update autostart setting:\n{e}")
+
+        try:
+            _set_headless_autostart(self._headless_var.get())
+        except Exception as e:
+            messagebox.showwarning("Headless Autostart", f"Could not update headless autostart:\n{e}")
 
         messagebox.showinfo("Saved", "Configuration saved. Changes will be applied automatically.")
 
