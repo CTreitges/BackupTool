@@ -26,9 +26,10 @@ def _should_ignore(path: str) -> bool:
 
 @dataclass
 class SyncEvent:
-    type: str  # 'upsert' | 'delete'
+    type: str  # 'upsert' | 'delete' | 'move'
     source_path: str
     pair: FolderPair
+    old_path: str = ""  # only set for 'move' events
 
 
 class SyncEventHandler(FileSystemEventHandler):
@@ -50,10 +51,23 @@ class SyncEventHandler(FileSystemEventHandler):
             self._pending[path] = t
             t.start()
 
-    def _emit(self, event_type: str, path: str) -> None:
+    def _emit(self, event_type: str, path: str, old_path: str = "") -> None:
         with self._lock:
             self._pending.pop(path, None)
-        self._queue.put(SyncEvent(type=event_type, source_path=path, pair=self._pair))
+        self._queue.put(SyncEvent(type=event_type, source_path=path, pair=self._pair, old_path=old_path))
+
+    def _schedule_move(self, old_path: str, new_path: str) -> None:
+        if _should_ignore(new_path):
+            return
+        with self._lock:
+            # Cancel any pending events for old or new path
+            for p in (old_path, new_path):
+                existing = self._pending.pop(p, None)
+                if existing:
+                    existing.cancel()
+            t = threading.Timer(_DEBOUNCE_SECONDS, self._emit, args=("move", new_path, old_path))
+            self._pending[new_path] = t
+            t.start()
 
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
@@ -69,8 +83,7 @@ class SyncEventHandler(FileSystemEventHandler):
 
     def on_moved(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
-            self._schedule("delete", event.src_path)
-            self._schedule("upsert", event.dest_path)
+            self._schedule_move(event.src_path, event.dest_path)
 
 
 class FolderWatcher:

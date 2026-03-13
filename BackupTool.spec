@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec -- builds two executables:
-  dist/BackupTool/BackupToolService.exe   (Windows service binary)
-  dist/BackupTool/BackupToolTray.exe      (system tray app)
+PyInstaller spec -- builds:
+  dist/BackupTool/BackupToolTray.exe   (system tray app with embedded sync engine)
 """
 
 import sys
@@ -22,10 +21,7 @@ HIDDEN = [
     "win32api",
     "win32con",
     "win32event",
-    "win32service",
-    "win32serviceutil",
     "pywintypes",
-    "servicemanager",
     "winerror",
     "pystray._win32",
     "PIL._tkinter_finder",
@@ -38,37 +34,7 @@ DATAS = [
     (str(ROOT / "assets"), "assets"),
 ]
 
-# ── Analysis: Service ─────────────────────────────────────────────────────────
-a_svc = Analysis(  # noqa: F821
-    [str(ROOT / "service_entry.py")],
-    pathex=[str(ROOT)],
-    binaries=PYTHON_DLLS,
-    datas=DATAS,
-    hiddenimports=HIDDEN,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=["tkinter", "unittest"],
-    noarchive=False,
-)
-
-pyz_svc = PYZ(a_svc.pure)  # noqa: F821
-
-exe_svc = EXE(  # noqa: F821
-    pyz_svc,
-    a_svc.scripts,
-    [],
-    exclude_binaries=True,
-    name="BackupToolService",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=True,            # service needs a real subsystem for SCM
-    icon=str(ROOT / "assets" / "icon_active.ico") if (ROOT / "assets" / "icon_active.ico").exists() else None,
-)
-
-# ── Analysis: Tray ────────────────────────────────────────────────────────────
+# ── Analysis: Tray (includes embedded sync engine) ──────────────────────────
 a_tray = Analysis(  # noqa: F821
     [str(ROOT / "tray_entry.py")],
     pathex=[str(ROOT)],
@@ -98,11 +64,8 @@ exe_tray = EXE(  # noqa: F821
     icon=str(ROOT / "assets" / "icon_active.ico") if (ROOT / "assets" / "icon_active.ico").exists() else None,
 )
 
-# ── Collect into one shared folder ───────────────────────────────────────────
+# ── Collect into one folder ─────────────────────────────────────────────────
 coll = COLLECT(  # noqa: F821
-    exe_svc,
-    a_svc.binaries,
-    a_svc.datas,
     exe_tray,
     a_tray.binaries,
     a_tray.datas,
@@ -110,5 +73,5 @@ coll = COLLECT(  # noqa: F821
     upx=False,
     upx_exclude=[],
     name="BackupTool",
-    contents_directory=".",   # flat layout – all DLLs next to the .exe
+    contents_directory=".",   # flat layout - all DLLs next to the .exe
 )

@@ -27,6 +27,7 @@ class SyncEngine:
             "last_full_scan": None,
             "last_purge": None,
             "errors": [],
+            "pair_status": {},
         }
         self._status_lock = threading.Lock()
 
@@ -92,8 +93,12 @@ class SyncEngine:
     def _recycle_bin(self, pair: FolderPair) -> RecycleBin:
         with self._lock:
             cfg = self._config
-        bin_root = Path(pair.destination) / cfg.recycle_bin_subdir
+        bin_root = self._dest_root(pair) / cfg.recycle_bin_subdir
         return RecycleBin(cfg, bin_root)
+
+    def _dest_root(self, pair: FolderPair) -> Path:
+        """Destination including source folder name as subfolder."""
+        return Path(pair.destination) / Path(pair.source).name
 
     def _dest_path(self, source_path: str, pair: FolderPair) -> Path:
         try:
@@ -102,7 +107,7 @@ class SyncEngine:
             # Fallback: use just the filename if relative_to fails
             rel = Path(Path(source_path).name)
             log.warning("Path %s is not relative to %s, using filename only", source_path, pair.source)
-        return Path(pair.destination) / rel
+        return self._dest_root(pair) / rel
 
     # ------------------------------------------------------------------
     # Worker
@@ -119,6 +124,8 @@ class SyncEngine:
             try:
                 if event.type == "upsert":
                     self._handle_upsert(event)
+                elif event.type == "move":
+                    self._handle_move(event)
                 elif event.type == "delete":
                     self._handle_delete(event)
             except Exception as exc:
@@ -142,12 +149,43 @@ class SyncEngine:
         shutil.copy2(str(src), str(dest))
         log.debug("Copied %s → %s", src, dest)
 
+    def _handle_move(self, event: SyncEvent) -> None:
+        """Handle rename/move: rename in dest, no recycle bin involved."""
+        old_dest = self._dest_path(event.old_path, event.pair)
+        new_dest = self._dest_path(event.source_path, event.pair)
+        new_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if old_dest.exists():
+            # Rename the old dest file to the new name
+            try:
+                shutil.move(str(old_dest), str(new_dest))
+                log.debug("Renamed %s → %s", old_dest, new_dest)
+                return
+            except Exception:
+                log.warning("Failed to rename %s, will copy instead", old_dest)
+
+        # Fallback: just copy the new file
+        src = Path(event.source_path)
+        if src.exists() and src.is_file():
+            shutil.copy2(str(src), str(new_dest))
+            log.debug("Copied (move fallback) %s → %s", src, new_dest)
+
     def _handle_delete(self, event: SyncEvent) -> None:
+        # Only move to recycle bin if source is truly gone
+        if Path(event.source_path).exists():
+            return
         dest = self._dest_path(event.source_path, event.pair)
         if not dest.exists():
             return
+        # Preserve subfolder structure in recycle bin
+        try:
+            rel_dir = str(Path(event.source_path).relative_to(event.pair.source).parent)
+            if rel_dir == ".":
+                rel_dir = ""
+        except ValueError:
+            rel_dir = ""
         rb = self._recycle_bin(event.pair)
-        rb.move_to_bin(dest, event.source_path, event.pair.id)
+        rb.move_to_bin(dest, event.source_path, event.pair.id, rel_dir=rel_dir)
 
     # ------------------------------------------------------------------
     # Full scan
@@ -175,13 +213,24 @@ class SyncEngine:
         self._flush_status()
         log.info("Full scan complete")
 
+    def _update_pair_status(self, pair_id: str, **kwargs) -> None:
+        import datetime
+        with self._status_lock:
+            ps = self._status.setdefault("pair_status", {})
+            entry = ps.setdefault(pair_id, {})
+            entry.update(kwargs)
+        self._flush_status()
+
     def _scan_pair(self, pair: FolderPair, recycle_subdir: str) -> None:
         src_root = Path(pair.source)
-        dst_root = Path(pair.destination)
+        dst_root = self._dest_root(pair)
 
         if not src_root.exists():
             log.warning("Source not found: %s", src_root)
+            self._update_pair_status(pair.id, state="error", error="Source not found")
             return
+
+        self._update_pair_status(pair.id, state="scanning", progress=0, total=0)
 
         # Build relative path sets
         src_rel: set[str] = set()
@@ -201,6 +250,10 @@ class SyncEngine:
                         continue
                     dst_rel.add(rel)
 
+        total = len(src_rel) + len(dst_rel - src_rel)
+        done = 0
+        self._update_pair_status(pair.id, total=total)
+
         # Upsert missing/outdated files
         for rel in src_rel:
             src_file = src_root / rel
@@ -215,14 +268,27 @@ class SyncEngine:
                 if abs(src_stat.st_mtime - dst_stat.st_mtime) >= 1 or src_stat.st_size != dst_stat.st_size:
                     shutil.copy2(str(src_file), str(dst_file))
                     log.debug("Full-scan update: %s", rel)
+            done += 1
+            if done % 50 == 0 or done == len(src_rel):
+                self._update_pair_status(pair.id, progress=done)
 
-        # Move orphans to recycle bin
+        # Move orphans to recycle bin (only if source truly doesn't exist)
         rb = self._recycle_bin(pair)
         orphans = dst_rel - src_rel
         for rel in orphans:
+            src_file = src_root / rel
             dst_file = dst_root / rel
-            if dst_file.exists():
-                rb.move_to_bin(dst_file, str(src_root / rel), pair.id)
+            # Double-check: only move if source really doesn't exist
+            if dst_file.exists() and not src_file.exists():
+                rel_dir = str(Path(rel).parent)
+                if rel_dir == ".":
+                    rel_dir = ""
+                rb.move_to_bin(dst_file, str(src_file), pair.id, rel_dir=rel_dir)
+            done += 1
+
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._update_pair_status(pair.id, state="idle", progress=total, last_sync=now)
 
     # ------------------------------------------------------------------
     # Scheduler
@@ -263,7 +329,7 @@ class SyncEngine:
         log.info("Running recycle bin purge")
         seen_bins: set[str] = set()
         for pair in pairs:
-            bin_root = Path(pair.destination) / recycle_subdir
+            bin_root = Path(pair.destination) / Path(pair.source).name / recycle_subdir
             key = str(bin_root)
             if key in seen_bins:
                 continue
